@@ -1,0 +1,13 @@
+AeroCage-XV8.0/
+├── bootstrapper.py          # لضمان عمل الوحدات
+├── main_app.py              # الملف الرئيسي (Launcher)
+├── utils/
+│   └── logger.py            # نظام التسجيل
+├── ui/
+│   ├── theme_engine.py      # محرك الثيمات
+│   ├── main_window.py       # النافذة الرئيسية (Sidebar + Tabs)
+│   └── pages/               # الصفحات الفرعية
+│       ├── device_management_page.py
+│       └── wireless_query_page.py
+└── repositories/
+    └── device_repository.py # قاعدة البيانات
