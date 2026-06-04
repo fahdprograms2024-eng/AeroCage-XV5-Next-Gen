@@ -218,7 +218,28 @@ class SSHConnector:
                 logger.error(f"Error closing SSH connection: {e}")
             finally:
                 self.client = None
+# core/ssh_connector.py (معدل للتحكم اليدوي)
 
+    def connect_with_retry(self, max_retries: int = 3) -> bool:
+        """
+        محاولة اتصال مع إعادة محاولة (يتم استدعاؤها يدوياً من قبل المستخدم).
+        """
+        attempt = 0
+        while attempt < max_retries:
+            try:
+                if self.connect():
+                    return True
+            except SSHError as e:
+                logger.warning(f"Attempt {attempt + 1} failed for {self.hostname}: {e}")
+            
+            attempt += 1
+            if attempt < max_retries:
+                # هنا يمكن إضافة تأخير بسيط، لكن لا نعيد المحاولة فوراً دون علم المستخدم
+                # سنتركها كدالة واحدة تنفذ المحاولة كاملة إذا طلب المستخدم ذلك
+                time.sleep(1) 
+        
+        return False
+    
     def __enter__(self):
         """Context Manager: الدخول."""
         self.connect()
