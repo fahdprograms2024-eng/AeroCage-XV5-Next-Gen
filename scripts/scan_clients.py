@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
 File Name: scripts/scan_clients.py
-Version: 8.0.0 [AeroCage Next Gen]
-Description: Unified client scanner module.
-             Connects to OpenWRT device, extracts wireless status, clients, 
-             checks for active Airserv/Aireplay attacks, and returns JSON.
-             Uses proven SSH and Parser logic from legacy code.
+Version: 8.0.1 [AeroCage Next Gen - Dynamic Discovery]
+Description: Scans for active processes (Airserv, Aireplay) by inspecting /proc and ps output.
+             NO hardcoded ports. Returns PIDs for dynamic killing.
 """
 
 import json
@@ -14,42 +12,31 @@ import sys
 import os
 import time
 
-# إضافة المسار للجذر للمشروع (للاستيراد من core و utils)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core.ssh_connector import SSHConnector  # من الكود القديم المجرّب
-from core.security import SecurityEngine    # من الإصدار الجديد
-from services.report_parser import ReportParser # من الكود القديم المجرّب
+from core.ssh_connector import SSHConnector
+from core.security import SecurityEngine
 from utils.logger import AeroLogger
 
 logger = AeroLogger.get_logger()
 
 class WirelessScanner:
-    """
-    ماسح لاسلكي موحد يجمع بيانات الزبائن، الانترفيسات، ويكشف الهجمات.
-    """
-
     def __init__(self, ip: str, user: str, password: str):
         self.ip = ip
         self.user = user
         self.password = password
-        self.security = SecurityEngine()
-        # فك تشفير كلمة المرور إذا كانت مشفرة (في حالة الاستخدام من قاعدة البيانات)
-        # لكن هنا نمررها مباشرة كما هي من الواجهة
         self.connector = SSHConnector(ip, user, password)
-        self.parser = ReportParser()
 
-    def execute_scan(self, check_airserv: bool = True, check_attacks: bool = True) -> dict:
+    def execute_scan(self) -> dict:
         """
-        تنفيذ الفحص الكامل وإرجاع النتائج كقاموس JSON.
+        فحص شامل: زبائن، انترفيسات، وعمليات نشطة (بدون افتراض بورتات).
         """
         result = {
             "success": False,
             "device_info": {},
             "wireless_status": [],
             "clients": [],
-            "airserv_detected": [],
-            "attacks_detected": [],
+            "active_services": [], # قائمة الخدمات النشطة (Airserv, Aireplay) مع PIDs
             "errors": []
         }
 
@@ -58,51 +45,36 @@ class WirelessScanner:
             return result
 
         try:
-            # 1. بناء الأمر الموحد (One-Shot Command)
-            # نجمع كل المعلومات المطلوبة في أمر واحد لتقليل زمن الـ RTT
+            # 1. أمر واحد لجلب كل شيء
+            # نستخدم `ps -ef` للحصول على PID واسم العملية كاملة
+            # نستخدم `iw dev` للانترفيسات
+            # نستخدم `iw dev wlan0 station dump` للزبائن
             commands = [
                 "echo '===RELEASE===' && cat /etc/openwrt_release 2>/dev/null",
-                "echo '===UPTIME===' && cat /proc/uptime 2>/dev/null",
                 "echo '===WIFI_STATUS===' && ubus call network.wireless status 2>/dev/null",
-                "echo '===CLIENTS===' && hostapd-cli -i wlan0 status 2>/dev/null || iw dev wlan0 station dump 2>/dev/null",
+                "echo '===CLIENTS===' && iw dev wlan0 station dump 2>/dev/null",
                 "echo '===INTERFACES===' && iw dev 2>/dev/null",
+                # الأمر الأهم: جلب كل العمليات النشطة
+                "echo '===ALL_PROCESSES===' && ps -ef 2>/dev/null",
+                # فحص المنافذ فقط كـ "معلومة إضافية" (وليس للكشف عن الخدمة)
+                "echo '===OPEN_PORTS===' && ss -tlnp 2>/dev/null | head -20",
             ]
 
-            # إضافة أوامر الفحص الاختياري
-            if check_airserv:
-                # فحص المنافذ الشائعة لـ Airserv (666, 777, etc.)
-                # نستخدم netstat أو ss إذا توفر، وإلا نستخدم lsof
-                commands.append("echo '===AIRSERV_PORTS===' && (ss -tlnp 2>/dev/null | grep -E ':(666|777|888|999) ' || netstat -tlnp 2>/dev/null | grep -E ':(666|777|888|999) ' || echo 'No ports found')")
-            
-            if check_attacks:
-                # فحص عمليات aireplay-ng النشطة
-                commands.append("echo '===AIREPLAY_PROCESSES===' && ps | grep -i aireplay | grep -v grep || echo 'No aireplay processes'")
-
             full_cmd = "; ".join(commands)
-
-            logger.info(f"إرسال أمر فحص شامل إلى {self.ip}...")
             raw_output = self.connector.execute_one_shot(full_cmd)
 
             if not raw_output:
-                result["errors"].append("لم يتم استلام بيانات من الجهاز.")
+                result["errors"].append("لم يتم استلام بيانات.")
                 return result
 
-            # 2. تحليل البيانات باستخدام ReportParser
-            parsed_data = self.parser.extract_sections(raw_output)
-            
-            # ملء النتائج
+            # 2. تحليل البيانات
             result["success"] = True
-            result["device_info"] = self._parse_device_info(parsed_data.get("RELEASE", ""))
-            result["wireless_status"] = self._parse_wireless_status(parsed_data.get("WIFI_STATUS", ""))
-            result["clients"] = self._parse_clients(parsed_data.get("CLIENTS", ""))
+            result["device_info"] = self._parse_device_info(raw_output)
+            result["wireless_status"] = self._parse_wireless_status(raw_output)
+            result["clients"] = self._parse_clients(raw_output)
             
-            if check_airserv:
-                result["airserv_detected"] = self._parse_airserv(parsed_data.get("AIRSERV_PORTS", ""))
-            
-            if check_attacks:
-                result["attacks_detected"] = self._parse_attacks(parsed_data.get("AIREPLAY_PROCESSES", ""))
-
-            logger.info(f"تم استلام وتحليل البيانات من {self.ip} بنجاح.")
+            # 3. الكشف الديناميكي عن الخدمات النشطة (Dynamic Process Discovery)
+            result["active_services"] = self._discover_active_services(raw_output)
 
         except Exception as e:
             logger.exception(f"خطأ أثناء الفحص: {e}")
@@ -112,118 +84,169 @@ class WirelessScanner:
 
         return result
 
-    def _parse_device_info(self, release_text: str) -> dict:
-        """استخراج معلومات الجهاز من نصوص الـ release."""
-        info = {"model": "Unknown", "version": "Unknown", "target": "Unknown"}
-        if "Model" in release_text:
-            match = re.search(r'Model:\s*(.+)', release_text)
-            if match: info["model"] = match.group(1).strip()
-        if "OpenWrt Version" in release_text:
-            match = re.search(r'OpenWrt\s*([^\\n]+)', release_text)
-            if match: info["version"] = match.group(1).strip()
-        if "Target" in release_text:
-            match = re.search(r'Target:\s*(.+)', release_text)
-            if match: info["target"] = match.group(1).strip()
-        return info
-
-    def _parse_wireless_status(self, status_text: str) -> list:
+    def _discover_active_services(self, raw_output: str) -> list:
         """
-        تحليل حالة الـ wireless (ubus output).
-        يعيد قائمة بالانترفيسات والترددات.
+        البحث في قائمة العمليات عن: aireplay-ng, aireplay, airserv-ng, airodump-ng
+        واستخراج PID, BSSID (إن وجد)، والأمر الكامل.
         """
-        # هذا يحتاج لتنقيح حسب مخرجات ubus الفعلية
-        # سنستخدم Regex بسيط لاستخراج أسماء الـ interfaces والترددات
-        interfaces = []
-        # مثال: {"radio0": {"up": true, "channel": 6, "frequency": 2437, ...}}
-        # سنحاول استخراج البيانات الخام كـ JSON إذا أمكن، أو نصياً
-        try:
-            # محاولة تحليل كـ JSON إذا كان المخرجات JSON
-            data = json.loads(status_text)
-            for radio, details in data.items():
-                interfaces.append({
-                    "radio": radio,
-                    "up": details.get("up", False),
-                    "channel": details.get("channel", "N/A"),
-                    "frequency": details.get("frequency", "N/A"),
-                    "type": "managed" if details.get("mode") == "AP" else "monitor"
-                })
-        except json.JSONDecodeError:
-            # إذا فشل JSON، نعيد النص الخام ليتم معالجته لاحقاً أو نستخدم Regex
-            # (يمكن تطوير هذا الجزء لاحقاً)
-            interfaces.append({"raw": status_text[:200]})
-        return interfaces
-
-    def _parse_clients(self, clients_text: str) -> list:
-        """
-        تحليل بيانات الزبائن (من hostapd-cli أو iw).
-        يعيد قائمة بـ {mac, signal, rate, auth}
-        """
-        clients = []
-        # نمط بسيط لاستخراج MAC و Signal
-        # يعتمد على مخرجات `iw dev wlan0 station dump`
-        lines = clients_text.split('\n')
-        current_client = {}
-        for line in lines:
-            if 'Station' in line:
-                if current_client: clients.append(current_client)
-                match = re.search(r'Station\s*([0-9A-Fa-f:]+)', line)
-                if match:
-                    current_client = {"mac": match.group(1), "signal": 0, "rate": 0}
-            elif 'signal:' in line:
-                match = re.search(r'signal:\s*(-?\d+)', line)
-                if match: current_client["signal"] = int(match.group(1))
-            elif 'rx bitrate:' in line:
-                match = re.search(r'rx bitrate:\s*([0-9.]+)', line)
-                if match: current_client["rate"] = float(match.group(1))
+        services = []
+        lines = raw_output.split('\n')
         
-        if current_client: clients.append(current_client)
-        return clients
+        # نمط البحث عن العمليات
+        patterns = {
+            "aireplay": r"aireplay-ng\s+.*?(-a\s+([0-9A-Fa-f:]{17}))?",
+            "airserv": r"airserv-ng\s+.*?(-d\s+(\S+))?", # قد يكون مختلفاً حسب النسخة
+            "airodump": r"airodump-ng\s+.*?(-c\s+(\d+))?\s+.*?(-I\s+(\S+))?", # مثال
+            "reaver": r"reaver\s+.*?(-b\s+([0-9A-Fa-f:]{17}))?"
+        }
 
-    def _parse_airserv(self, ports_text: str) -> list:
-        """فحص المنافذ لاكتشاف سيرفر Airserv."""
-        detected = []
-        # البحث عن منافذ 666, 777, 888, 999
-        ports = re.findall(r':(\d+)\s', ports_text)
-        for port in ports:
-            if port in ['666', '777', '888', '999']:
-                detected.append({"port": port, "service": "Airserv?", "status": "active"})
-        return detected
+        # نستخدم ps -ef output format: USER PID PPID ... CMD
+        # نمط مبسط لاستخراج PID والأمر
+        ps_pattern = re.compile(r"^\S+\s+(\d+)\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.*)$")
 
-    def _parse_attacks(self, process_text: str) -> list:
-        """فحص العمليات لاكتشاف هجمات aireplay."""
-        attacks = []
-        lines = process_text.split('\n')
         for line in lines:
-            if 'aireplay-ng' in line and 'grep' not in line:
-                # استخراج PID و BSSID إذا أمكن
-                match = re.search(r'(\d+)\s+.*aireplay-ng.*(-a\s*([0-9A-Fa-f:]+))?', line)
-                if match:
-                    pid = match.group(1)
-                    bssid = match.group(3) if match.group(3) else "Unknown"
-                    attacks.append({"pid": pid, "target_bssid": bssid, "cmd": line.strip()})
-        return attacks
+            if not line.strip():
+                continue
+            
+            # محاولة استخراج PID و CMD من ps -ef
+            match = ps_pattern.match(line)
+            if not match:
+                continue
+            
+            pid = match.group(1)
+            cmd = match.group(2)
+            
+            # البحث عن العمليات المهمة
+            found_type = None
+            target_info = {}
 
-# --- اختبار تجريبي (Main Block) ---
+            if "aireplay-ng" in cmd:
+                found_type = "aireplay"
+                # استخراج BSSID
+                bssid_match = re.search(r"-a\s+([0-9A-Fa-f:]{17})", cmd)
+                if bssid_match:
+                    target_info["target_bssid"] = bssid_match.group(1)
+            
+            elif "airserv-ng" in cmd:
+                found_type = "airserv"
+                # استخراج البورت أو الجهاز إذا وجد
+                port_match = re.search(r"-p\s+(\d+)", cmd)
+                if port_match:
+                    target_info["port"] = port_match.group(1)
+                iface_match = re.search(r"-d\s+(\S+)", cmd)
+                if iface_match:
+                    target_info["interface"] = iface_match.group(1)
+
+            elif "airodump-ng" in cmd:
+                found_type = "airodump"
+                iface_match = re.search(r"-I\s+(\S+)", cmd)
+                if iface_match:
+                    target_info["monitor_iface"] = iface_match.group(1)
+                channel_match = re.search(r"-c\s+(\d+)", cmd)
+                if channel_match:
+                    target_info["channel"] = channel_match.group(1)
+
+            if found_type:
+                services.append({
+                    "pid": int(pid),
+                    "type": found_type,
+                    "command": cmd.strip(),
+                    "target_info": target_info,
+                    "status": "running"
+                })
+
+        return services
+
+    def _parse_device_info(self, raw_output: str) -> dict:
+        # ... (نفس الكود السابق)
+        release_match = re.search(r"===RELEASE===(.*?)(?====|$)", raw_output, re.DOTALL)
+        if release_match:
+            text = release_match.group(1)
+            info = {"model": "Unknown", "version": "Unknown"}
+            m = re.search(r"Model:\s*(.+)", text)
+            if m: info["model"] = m.group(1).strip()
+            m = re.search(r"OpenWrt\s*([^\\n]+)", text)
+            if m: info["version"] = m.group(1).strip()
+            return info
+        return {}
+
+    def _parse_wireless_status(self, raw_output: str) -> list:
+        # ... (نفس الكود السابق)
+        status_match = re.search(r"===WIFI_STATUS===(.*?)(?====|$)", raw_output, re.DOTALL)
+        if status_match:
+            try:
+                return json.loads(status_match.group(1).strip())
+            except:
+                return [{"raw": status_match.group(1)[:200]}]
+        return []
+
+    def _parse_clients(self, raw_output: str) -> list:
+        # ... (نفس الكود السابق)
+        clients_match = re.search(r"===CLIENTS===(.*?)(?====|$)", raw_output, re.DOTALL)
+        if clients_match:
+            text = clients_match.group(1)
+            clients = []
+            current = {}
+            for line in text.split('\n'):
+                if 'Station' in line:
+                    if current: clients.append(current)
+                    m = re.search(r'Station\s*([0-9A-Fa-f:]+)', line)
+                    if m: current = {"mac": m.group(1), "signal": 0, "rate": 0}
+                elif 'signal:' in line and current:
+                    m = re.search(r'signal:\s*(-?\d+)', line)
+                    if m: current["signal"] = int(m.group(1))
+                elif 'rx bitrate:' in line and current:
+                    m = re.search(r'rx bitrate:\s*([0-9.]+)', line)
+                    if m: current["rate"] = float(m.group(1))
+            if current: clients.append(current)
+            return clients
+        return []
+
+    # --- دالة جديدة: قتل عملية محددة ---
+    def kill_process(self, pid: int) -> dict:
+        """
+        قتل عملية محددة (PID) باستخدام SSH.
+        returns: {"success": bool, "message": str}
+        """
+        if not self.connector.connect():
+            return {"success": False, "message": "فشل الاتصال."}
+        
+        try:
+            # أمر قتل قوي: kill -9 (SIGKILL)
+            # نستخدم `kill -9` مباشرة لأنه أسرع وأقوى في البيئات المغلقة
+            cmd = f"kill -9 {pid}"
+            output = self.connector.execute_one_shot(cmd)
+            
+            # التحقق من النتيجة
+            if "No such process" in output or "No such process" in output.lower():
+                return {"success": True, "message": f"العملية {pid} لم تكن موجودة أصلاً."}
+            elif "Permission denied" in output:
+                return {"success": False, "message": "لا توجد صلاحية لقتل العملية."}
+            else:
+                # نفترض النجاح إذا لم يرد خطأ صريح
+                return {"success": True, "message": f"تم قتل العملية {pid} بنجاح."}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+        finally:
+            self.connector.close()
+
+# --- اختبار تجريبي ---
 if __name__ == "__main__":
-    # بيانات اختبار (يمكن تغييرها)
     TEST_IP = "192.168.1.1"
     TEST_USER = "root"
-    TEST_PASS = "your_password"
+    TEST_PASS = "password"
 
-    print("🚀 بدء فحص تجريبي...")
     scanner = WirelessScanner(TEST_IP, TEST_USER, TEST_PASS)
-    result = scanner.execute_scan(check_airserv=True, check_attacks=True)
     
-    print("\n📊 النتائج (JSON):")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-
-    if result["success"]:
-        print("\n✅ الفحص نجح!")
-        if result["airserv_detected"]:
-            print(f"⚠️ تم اكتشاف سيرفر Airserv على المنافذ: {[p['port'] for p in result['airserv_detected']]}")
-        if result["attacks_detected"]:
-            print(f"⚠️ تم اكتشاف هجمات جارية: {len(result['attacks_detected'])} عملية")
-    else:
-        print("\n❌ فشل الفحص:")
-        for err in result["errors"]:
-            print(f" - {err}")
+    print("🔍 جاري الفحص...")
+    data = scanner.execute_scan()
+    
+    print(json.dumps(data, indent=2))
+    
+    if data["success"] and data["active_services"]:
+        print("\n⚠️ تم العثور على عمليات نشطة:")
+        for svc in data["active_services"]:
+            print(f"  - PID: {svc['pid']} | Type: {svc['type']} | Target: {svc['target_info']}")
+            # اختبار القتل (اختياري)
+            # res = scanner.kill_process(svc['pid'])
+            # print(f"   Kill Result: {res['message']}")
