@@ -198,6 +198,88 @@ class AttackerRepository:
             self.db.delete_attacker(attacker_id)
             logger.info(f"Attacker {attacker_id} deleted successfully.")
             return True
+
+# ... (يتم استبدال محتوى ملف repositories/attacker_repository.py بالكود التالي مع الاحتفاظ بالدوال السابقة) ...
+
+    # --- دوال إدارة المجموعات (Group Management) ---
+
+    def update_attacker_group(self, attacker_id: int, group_id: int = None) -> bool:
+        """
+        تحديث مجموعة مهاجم (إرجاع أو إزالة).
+
+        Args:
+            attacker_id (int): معرف المهاجم.
+            group_id (int, optional): معرف المجموعة الجديدة أو None للإزالة.
+
+        Returns:
+            bool: True إذا نجح التحديث.
+        """
+        try:
+            if group_id is not None and not self._group_exists(group_id):
+                raise RepositoryError(f"Group {group_id} does not exist.")
+
+            logger.info(f"Updating attacker {attacker_id} group to: {group_id}")
+            self.db.execute(
+                "UPDATE attackers SET group_id = ? WHERE id = ?",
+                (group_id, attacker_id)
+            )
+            return True
+        except DatabaseError as e:
+            logger.error(f"Failed to update attacker group: {e}")
+            raise RepositoryError(f"Error updating group: {e}")
+
+    def group_exists(self, group_id: int) -> bool:
+        """التحقق من وجود مجموعة."""
+        try:
+            with self.db._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1 FROM groups WHERE id = ? LIMIT 1", (group_id,))
+                return cursor.fetchone() is not None
+        except Exception:
+            return False
+
+    def get_group_members_count(self, group_id: int) -> int:
+        """جلب عدد أعضاء مجموعة."""
+        try:
+            with self.db._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM attackers WHERE group_id = ?", (group_id,))
+                return cursor.fetchone()
+        except Exception:
+            return 0
+
+    def update_group_members_to_null(self, group_id: int) -> int:
+        """
+        إعادة تعيين جميع أعضاء مجموعة إلى NULL (قبل حذف المجموعة).
+
+        Returns:
+            int: عدد السجلات المحدثة.
+        """
+        try:
+            with self.db._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE attackers SET group_id = NULL WHERE group_id = ?", (group_id,))
+                count = cursor.rowcount
+                logger.info(f"Set {count} members to NULL for group {group_id}.")
+                return count
+        except Exception as e:
+            logger.error(f"Failed to update group members to NULL: {e}")
+            raise RepositoryError(f"Error updating group members: {e}")
+
+    def delete_group(self, group_id: int) -> bool:
+        """حذف مجموعة (يفترض أن الأعضاء تم إعادة تعيينهم مسبقاً)."""
+        try:
+            with self.db._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+                if cursor.rowcount == 0:
+                    raise RepositoryError("Group not found.")
+                logger.info(f"Group {group_id} deleted.")
+                return True
+        except DatabaseError as e:
+            raise RepositoryError(f"Error deleting group: {e}")
+
+# ... (باقي الكود السابق يبقى كما هو) ...
         except DatabaseError as e:
             if "not found" in str(e).lower():
                 logger.warning(f"
