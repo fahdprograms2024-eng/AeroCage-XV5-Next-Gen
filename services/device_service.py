@@ -187,6 +187,63 @@ class DeviceService:
             res = self.scan_device(dev["id"])
             results.append(res)
         return results
+# services/device_service.py (معدل للتحكم اليدوي)
+
+    def suggest_scan_action(self, device_id: str) -> Dict[str, Any]:
+        """
+        يقترح على المستخدم إجراءً بناءً على حالة الجهاز الحالية.
+        لا ينفذ أي شيء، فقط يقدم نصيحة.
+        """
+        device = self.repository.get_device_by_id(device_id)
+        if not device:
+            return {"suggestion": "Device not found."}
+        
+        current_status = device # status field
+        
+        suggestions = []
+        if current_status == "Offline":
+            suggestions.append("جهاز غير متصل. هل تريد محاولة الاتصال الذكي (إعادة محاولة 3 مرات)؟")
+            suggestions.append("هل تريد تجربة إعادة تشغيل خدمة SSH عن بعد؟ (تتطلب صلاحيات)")
+        elif current_status == "Online":
+            suggestions.append("الجهاز متصل. هل تريد تحليل نوع الجهاز ونظام التشغيل؟ (فحص بصمة)")
+        
+        return {
+            "device_id": device_id,
+            "current_status": current_status,
+            "suggestions": suggestions,
+            "action_required": True # يعني المستخدم يجب أن يقرر
+        }
+
+    def execute_smart_scan(self, device_id: str) -> Dict[str, Any]:
+        """
+        ينفذ الفحص الذكي (إعادة المحاولة) **بناءً على طلب المستخدم**.
+        """
+        # نفس منطق الفحص السابق، لكن يثبت في السجل أنه تم تنفيذه بناءً على طلب المستخدم
+        return self.smart_scan_device(device_id) # نستخدم الدالة السابقة مع تعديل السجل
+
+    def execute_device_fingerprint(self, device_id: str) -> Dict[str, Any]:
+        """
+        ينفذ فحص البصمة (تحديد نوع الجهاز) **بناءً على طلب المستخدم**.
+        """
+        device = self.repository.get_device_by_id(device_id)
+        if not device:
+            return {"error": "Device not found"}
+        
+        ip, user, pass_enc = device, device, device
+        password = None
+        if pass_enc:
+            from core.security import decrypt_data
+            password = decrypt_data(pass_enc)
+
+        ssh = SSHConnector(hostname=ip, username=user, password=password, timeout=5)
+        if ssh.connect():
+            fingerprint = ssh.fingerprint_device()
+            ssh.close()
+            return {"success": True, "fingerprint": fingerprint}
+        else:
+            ssh.close()
+            return {"success": False, "error": "Failed to connect for fingerprinting."}
+
 
     def update_device_status_manually(self, device_id: str, status: str) -> bool:
         """Manually update device status (e.g., set to Maintenance)."""
